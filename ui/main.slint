@@ -1,0 +1,534 @@
+import { Button, VerticalBox, HorizontalBox, ListView, LineEdit, CheckBox, ScrollView, GroupBox, Spinner } from "std-widgets.slint";
+
+// Rust 側と共有するデータ構造。
+export struct DiskInfo {
+    path: string,
+    model: string,
+    size: string,
+    removable: bool,
+}
+
+export struct ImageInfo {
+    path: string,
+    filename: string,
+    size: string,
+    arch: string,
+    artifact: string,
+    banner: string,
+    version: string,
+    arch-match: bool,
+    superfloppy-available: bool,
+}
+
+// 確認ダイアログで保留中の破壊的アクション。
+enum ConfirmAction {
+    none,
+    reboot,
+    poweroff,
+}
+
+// 画面遷移。
+export enum Page {
+    disk-select,
+    image-select,
+    options,
+    installing,
+    done,
+    system-info,
+    terminal,
+}
+
+// 一覧の選択可能な行。
+component SelectRow inherits Rectangle {
+    in property <bool> selected;
+    in property <bool> enabled: true;
+    callback clicked;
+    height: content.preferred-height + 20px;
+    border-radius: 6px;
+    border-width: selected ? 2px : 1px;
+    border-color: selected ? #3b82f6 : #d0d0d0;
+    background: !enabled ? #f2f2f2 : (touch.has-hover ? #eef4ff : white);
+    touch := TouchArea {
+        enabled: enabled;
+        clicked => { root.clicked(); }
+    }
+    content := HorizontalLayout {
+        padding: 12px;
+        @children
+    }
+}
+
+component HeaderBar inherits Rectangle {
+    in property <string> title;
+    height: 56px;
+    background: #1f2937;
+    Text {
+        x: 20px;
+        vertical-alignment: center;
+        text: title;
+        color: white;
+        font-size: 20px;
+        font-weight: 700;
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "genpack installer";
+    preferred-width: 900px;
+    preferred-height: 600px;
+    background: #f7f7f8;
+
+    // ---- 状態 ----
+    in-out property <Page> page: Page.disk-select;
+
+    in property <[DiskInfo]> disks;
+    in property <[ImageInfo]> images;
+
+    in-out property <int> selected-disk: -1;
+    in-out property <int> selected-image: -1;
+
+    in-out property <string> hostname;
+    in-out property <string> timezone;
+    in-out property <string> locale;
+    in-out property <bool> superfloppy;
+
+    // 実行中の非同期処理の数。0 より大きい間は busy オーバーレイで操作を遮断する。
+    // bool でなくカウンタなのは、複数の処理が重なり得るため
+    // （例: 起動直後のディスク一覧とイメージ一覧の同時取得）。
+    in-out property <int> busy-count: 0;
+
+    in property <float> progress;           // 0.0 .. 1.0
+    in property <string> progress-message;
+    in property <string> install-error;     // 空なら成功
+    in property <string> sysinfo-text;
+
+    // debug ビルドか（Rust 側から cfg!(debug_assertions) を流し込む）。
+    // Slint には #[cfg] が無いので、開発時のみのメニュー項目はこれで出し分ける。
+    in property <bool> debug-build: false;
+
+    // ---- コールバック（Rust 実装） ----
+    callback refresh-disks();
+    callback refresh-images();
+    callback start-install();
+    callback do-reboot();
+    callback do-poweroff();
+    callback do-exit();
+    callback load-sysinfo();
+
+    // 選択中イメージの取得ヘルパ。
+    property <bool> has-image: selected-image >= 0 && selected-image < images.length;
+    property <bool> has-disk: selected-disk >= 0 && selected-disk < disks.length;
+
+    // 補助アクション（システム情報・ターミナル・再起動/電源断）の集約メニュー。
+    // 画面下端のボタンから開くドロップダウンは Slint のポップアップ配置調整が
+    // 効かず画面外にはみ出したため、上端から下に開く古典的メニューバーにしている。
+    // MenuBar は if で囲めないため、無効化はすべて enabled で行う。
+    // メニューバー領域は busy オーバーレイ（通常の子要素）で覆えないため、
+    // busy 中の無効化も enabled に含める必要がある。
+    // 確認待ちのアクション（再起動/電源断はワンクッション置いてから実行する）。
+    property <ConfirmAction> confirm-action: ConfirmAction.none;
+
+    property <bool> menu-actions-enabled: page != Page.installing && busy-count == 0
+        && confirm-action == ConfirmAction.none;
+    MenuBar {
+        Menu {
+            title: @tr("Menu");
+            MenuItem {
+                title: "ℹ " + @tr("System info");
+                enabled: menu-actions-enabled;
+                activated => { load-sysinfo(); page = Page.system-info; }
+            }
+            MenuItem {
+                title: "🖥 " + @tr("Terminal");
+                enabled: menu-actions-enabled;
+                activated => { page = Page.terminal; }
+            }
+            MenuSeparator { }
+            // 再起動/電源断はインストールを中止したい実機ユーザー向け。
+            // 開発機で誤操作すると実害があるので release ビルドのみに出す。
+            if !debug-build: MenuItem {
+                title: "🔃 " + @tr("Reboot");
+                enabled: menu-actions-enabled;
+                activated => { confirm-action = ConfirmAction.reboot; }
+            }
+            if !debug-build: MenuItem {
+                title: "🔌 " + @tr("Poweroff");
+                enabled: menu-actions-enabled;
+                activated => { confirm-action = ConfirmAction.poweroff; }
+            }
+            // Exit は開発時の脱出ハッチとして busy 中も含め常に有効。
+            if debug-build: MenuItem {
+                title: "🚪 " + @tr("Exit");
+                activated => { do-exit(); }
+            }
+        }
+    }
+
+    VerticalLayout {
+        // ===================== ディスク選択 =====================
+        if page == Page.disk-select: VerticalLayout {
+            HeaderBar { title: @tr("Select installation target disk"); }
+            VerticalBox {
+                padding: 20px;
+                spacing: 12px;
+                Text {
+                    text: @tr("Choose the disk to install to. All data on it will be erased.");
+                    color: #b91c1c;
+                }
+                ListView {
+                    vertical-stretch: 1;
+                    for disk[idx] in disks: SelectRow {
+                        selected: idx == selected-disk;
+                        clicked => { selected-disk = idx; }
+                        VerticalLayout {
+                            spacing: 2px;
+                            Text {
+                                text: disk.path + "  (" + disk.size + ")"
+                                    + (disk.removable ? "  ⏏ " + @tr("removable") : "");
+                                font-size: 16px;
+                                font-weight: 600;
+                            }
+                            Text { text: disk.model; color: #6b7280; }
+                        }
+                    }
+                }
+                HorizontalBox {
+                    alignment: space-between;
+                    Button {
+                        text: "🔄 " + @tr("Refresh");
+                        clicked => { refresh-disks(); }
+                    }
+                    Button {
+                        text: @tr("Next") + " ➡";
+                        enabled: has-disk;
+                        clicked => { page = Page.image-select; }
+                    }
+                }
+            }
+        }
+
+        // ===================== イメージ選択 =====================
+        if page == Page.image-select: VerticalLayout {
+            HeaderBar { title: @tr("Select image to install"); }
+            VerticalBox {
+                padding: 20px;
+                spacing: 12px;
+                ListView {
+                    vertical-stretch: 1;
+                    for img[idx] in images: SelectRow {
+                        selected: idx == selected-image;
+                        enabled: img.arch-match;
+                        clicked => {
+                            selected-image = idx;
+                            hostname = img.artifact;
+                            superfloppy = false;
+                        }
+                        VerticalLayout {
+                            spacing: 2px;
+                            Text {
+                                text: img.filename + "  (" + img.size + ")";
+                                font-size: 16px;
+                                font-weight: 600;
+                            }
+                            Text {
+                                text: "arch: " + img.arch + "   artifact: " + img.artifact
+                                    + (img.version != "" ? "   " + img.version : "");
+                                color: #6b7280;
+                            }
+                            if !img.arch-match: Text {
+                                text: @tr("Architecture does not match this machine — cannot install");
+                                color: #b91c1c;
+                            }
+                        }
+                    }
+                }
+                HorizontalBox {
+                    alignment: space-between;
+                    Button {
+                        text: "⬅ " + @tr("Back");
+                        clicked => { page = Page.disk-select; }
+                    }
+                    HorizontalBox {
+                        Button {
+                            text: "🔄 " + @tr("Refresh");
+                            clicked => { refresh-images(); }
+                        }
+                        Button {
+                            text: @tr("Next") + " ➡";
+                            enabled: has-image;
+                            clicked => { page = Page.options; }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ===================== インストールオプション =====================
+        if page == Page.options: VerticalLayout {
+            HeaderBar { title: @tr("Installation options"); }
+            ScrollView {
+                VerticalBox {
+                    alignment: start;   // 余白を下端に寄せ、各グループを自然な高さに詰める
+                    padding: 20px;
+                    spacing: 16px;
+
+                    GroupBox {
+                        title: @tr("Summary");
+                        VerticalLayout {
+                            spacing: 4px;
+                            Text { text: @tr("Disk") + ": " + (has-disk ? disks[selected-disk].path : ""); }
+                            Text { text: @tr("Image") + ": " + (has-image ? images[selected-image].filename : ""); }
+                        }
+                    }
+
+                    GroupBox {
+                        title: @tr("Disk format");
+                        VerticalLayout {
+                            spacing: 6px;
+                            CheckBox {
+                                text: @tr("Superfloppy mode (format whole disk as FAT32, no partition table)");
+                                checked <=> superfloppy;
+                                enabled: has-image && images[selected-image].superfloppy-available;
+                            }
+                            if has-image && !images[selected-image].superfloppy-available: Text {
+                                text: @tr("Unavailable: system image is 4GiB or larger");
+                                color: #6b7280;
+                                font-size: 12px;
+                            }
+                        }
+                    }
+
+                    GroupBox {
+                        title: @tr("System settings");
+                        VerticalLayout {
+                            spacing: 10px;
+                            HorizontalLayout {
+                                spacing: 12px;
+                                Text { width: 120px; vertical-alignment: center; text: @tr("Hostname"); }
+                                LineEdit { text <=> hostname; placeholder-text: @tr("(optional)"); }
+                            }
+                            HorizontalLayout {
+                                spacing: 12px;
+                                Text { width: 120px; vertical-alignment: center; text: @tr("Timezone"); }
+                                LineEdit { text <=> timezone; }
+                            }
+                            HorizontalLayout {
+                                spacing: 12px;
+                                Text { width: 120px; vertical-alignment: center; text: @tr("Locale"); }
+                                LineEdit { text <=> locale; }
+                            }
+                        }
+                    }
+                }
+            }
+            HorizontalBox {
+                padding: 20px;
+                alignment: space-between;
+                Button {
+                    text: "⬅ " + @tr("Back");
+                    clicked => { page = Page.image-select; }
+                }
+                Button {
+                    text: @tr("Install");
+                    primary: true;
+                    clicked => { start-install(); }
+                }
+            }
+        }
+
+        // ===================== インストール中 =====================
+        if page == Page.installing: VerticalLayout {
+            HeaderBar { title: @tr("Installing"); }
+            VerticalBox {
+                padding: 40px;
+                spacing: 20px;
+                alignment: center;
+                Text {
+                    text: @tr("Installing… Do not remove the disk or power off.");
+                    font-size: 18px;
+                    horizontal-alignment: center;
+                }
+                // シンプルな自作プログレスバー。
+                Rectangle {
+                    height: 24px;
+                    border-radius: 12px;
+                    background: #e5e7eb;
+                    Rectangle {
+                        x: 0;
+                        width: parent.width * progress;
+                        height: parent.height;
+                        border-radius: 12px;
+                        background: #3b82f6;
+                    }
+                }
+                Text {
+                    text: Math.round(progress * 100) + "%   " + progress-message;
+                    horizontal-alignment: center;
+                    color: #374151;
+                }
+            }
+        }
+
+        // ===================== 完了 =====================
+        if page == Page.done: VerticalLayout {
+            HeaderBar { title: @tr("Installation complete"); }
+            VerticalBox {
+                padding: 40px;
+                spacing: 20px;
+                alignment: center;
+                if install-error == "": Text {
+                    text: @tr("Installation completed successfully.");
+                    font-size: 20px;
+                    horizontal-alignment: center;
+                }
+                if install-error != "": VerticalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: @tr("Installation failed:");
+                        font-size: 20px;
+                        color: #b91c1c;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        text: install-error;
+                        horizontal-alignment: center;
+                        color: #b91c1c;
+                        wrap: word-wrap;
+                    }
+                }
+                HorizontalBox {
+                    alignment: center;
+                    spacing: 12px;
+                    if install-error != "": Button {
+                        text: "⬅ " + @tr("Back");
+                        clicked => { page = Page.options; }
+                    }
+                    if install-error == "": Button {
+                        text: @tr("Reboot");
+                        primary: true;
+                        clicked => { do-reboot(); }
+                    }
+                }
+            }
+        }
+
+        // ===================== システム情報 =====================
+        if page == Page.system-info: VerticalLayout {
+            HeaderBar { title: @tr("System information"); }
+            VerticalBox {
+                padding: 20px;
+                ScrollView {
+                    vertical-stretch: 1;
+                    Text {
+                        text: sysinfo-text;
+                        font-family: "monospace";
+                        font-size: 14px;
+                    }
+                }
+                HorizontalBox {
+                    alignment: start;
+                    Button {
+                        text: "⬅ " + @tr("Back");
+                        clicked => { page = Page.disk-select; }
+                    }
+                }
+            }
+        }
+
+        // ===================== ターミナル（プレースホルダ） =====================
+        if page == Page.terminal: VerticalLayout {
+            HeaderBar { title: @tr("Terminal"); }
+            VerticalBox {
+                padding: 20px;
+                spacing: 12px;
+                alignment: center;
+                Text {
+                    text: @tr("Terminal is not implemented yet.");
+                    font-size: 18px;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    // README「ターミナル画面」に基づく将来実装の説明。
+                    text: @tr("Planned: PTY + alacritty-terminal + fontdue rendered onto a Slint Image. Type 'exit' to return.");
+                    horizontal-alignment: center;
+                    color: #6b7280;
+                    wrap: word-wrap;
+                }
+                Button {
+                    text: "⬅ " + @tr("Back");
+                    clicked => { page = Page.disk-select; }
+                }
+            }
+        }
+    }
+
+    // ===================== 確認ダイアログ =====================
+    // 再起動/電源断のワンクッション。busy オーバーレイと同じ全画面遮断方式。
+    if confirm-action != ConfirmAction.none: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #00000060;
+        TouchArea { }   // 背面への操作を遮断
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 420px;
+            height: dialog-layout.preferred-height;
+            background: white;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #d0d0d0;
+            dialog-layout := VerticalBox {
+                padding: 24px;
+                spacing: 16px;
+                Text {
+                    text: confirm-action == ConfirmAction.reboot
+                        ? @tr("Reboot the machine?")
+                        : @tr("Power off the machine?");
+                    font-size: 16px;
+                    wrap: word-wrap;
+                }
+                HorizontalBox {
+                    alignment: end;
+                    spacing: 12px;
+                    Button {
+                        text: @tr("Cancel");
+                        clicked => { confirm-action = ConfirmAction.none; }
+                    }
+                    Button {
+                        text: confirm-action == ConfirmAction.reboot
+                            ? "🔃 " + @tr("Reboot")
+                            : "🔌 " + @tr("Poweroff");
+                        primary: true;
+                        clicked => {
+                            if (confirm-action == ConfirmAction.reboot) {
+                                do-reboot();
+                            } else {
+                                do-poweroff();
+                            }
+                            confirm-action = ConfirmAction.none;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ===================== busy オーバーレイ =====================
+    // 時間のかかる処理（lsblk 等）の間、全画面を半透明で覆って下の UI への
+    // ポインタ入力を遮断し、スピナーを表示する。後に書かれた要素が前面に
+    // 描画されるため、必ずコンポーネントの最後に置くこと。
+    if busy-count > 0: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #00000040;
+        TouchArea { }   // クリックを吸収してモーダルにする
+        Spinner {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 64px;
+            height: 64px;
+            indeterminate: true;
+        }
+    }
+}

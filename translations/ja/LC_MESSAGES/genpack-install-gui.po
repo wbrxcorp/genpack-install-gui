@@ -1,0 +1,122 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: genpack-install-gui\n"
+"Language: ja\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+msgid "Select installation target disk"
+msgstr "インストール先ディスクの選択"
+
+msgid "Choose the disk to install to. All data on it will be erased."
+msgstr "インストール先のディスクを選択してください。ディスク上のすべてのデータは消去されます。"
+
+msgid "removable"
+msgstr "リムーバブル"
+
+msgid "Refresh"
+msgstr "更新"
+
+msgid "System info"
+msgstr "システム情報"
+
+msgid "Terminal"
+msgstr "ターミナル"
+
+msgid "Next"
+msgstr "次へ"
+
+msgid "Select image to install"
+msgstr "インストールするイメージの選択"
+
+msgid "Architecture does not match this machine — cannot install"
+msgstr "アーキテクチャがこのマシンと一致しません — インストールできません"
+
+msgid "Back"
+msgstr "戻る"
+
+msgid "Installation options"
+msgstr "インストールオプション"
+
+msgid "Summary"
+msgstr "概要"
+
+msgid "Disk"
+msgstr "ディスク"
+
+msgid "Image"
+msgstr "イメージ"
+
+msgid "Disk format"
+msgstr "ディスクフォーマット"
+
+msgid "Superfloppy mode (format whole disk as FAT32, no partition table)"
+msgstr "スーパーフロッピーモード（パーティションを作らずディスク全体を FAT32 でフォーマット）"
+
+msgid "Unavailable: system image is 4GiB or larger"
+msgstr "選択不可: システムイメージが 4GiB 以上です"
+
+msgid "System settings"
+msgstr "システム設定"
+
+msgid "Hostname"
+msgstr "ホスト名"
+
+msgid "(optional)"
+msgstr "（任意）"
+
+msgid "Timezone"
+msgstr "タイムゾーン"
+
+msgid "Locale"
+msgstr "ロケール"
+
+msgid "Install"
+msgstr "インストール"
+
+msgid "Installing"
+msgstr "インストール中"
+
+msgid "Installing… Do not remove the disk or power off."
+msgstr "インストール中… ディスクを取り外したり電源を切ったりしないでください。"
+
+msgid "Installation complete"
+msgstr "インストール完了"
+
+msgid "Installation completed successfully."
+msgstr "インストールが正常に完了しました。"
+
+msgid "Installation failed:"
+msgstr "インストールに失敗しました:"
+
+msgid "Reboot"
+msgstr "再起動"
+
+msgid "System information"
+msgstr "システム情報"
+
+msgid "Terminal is not implemented yet."
+msgstr "ターミナルはまだ実装されていません。"
+
+msgid "Planned: PTY + alacritty-terminal + fontdue rendered onto a Slint Image. Type 'exit' to return."
+msgstr "実装予定: PTY + alacritty-terminal + fontdue で Slint の Image に描画。'exit' で戻ります。"
+
+msgid "Menu"
+msgstr "メニュー"
+
+msgid "Poweroff"
+msgstr "電源を切る"
+
+msgid "Exit"
+msgstr "終了"
+
+msgid "Reboot the machine?"
+msgstr "再起動しますか？"
+
+msgid "Power off the machine?"
+msgstr "電源を切りますか？"
+
+msgid "Cancel"
+msgstr "キャンセル"

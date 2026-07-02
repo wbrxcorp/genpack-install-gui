@@ -1,0 +1,19 @@
+[package]
+name = "genpack-install-gui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+slint = { version = "1", features = ["backend-winit", "backend-linuxkms"] }
+
+[build-dependencies]
+slint-build = "1"
+
+[features]
+# UI開発用モック。root権限の必要な実処理をダミーに差し替える。
+#   cargo run --features mock
+mock = []
+
+[[bin]]
+name = "genpack-install-gui"
+path = "src/main.rs"
