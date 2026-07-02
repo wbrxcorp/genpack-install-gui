@@ -106,6 +106,9 @@ export component MainWindow inherits Window {
     // Slint には #[cfg] が無いので、開発時のみのメニュー項目はこれで出し分ける。
     in property <bool> debug-build: false;
 
+    // Cargo.toml のバージョン（Rust 側から env!("CARGO_PKG_VERSION") を流し込む）。
+    in property <string> app-version;
+
     // ---- コールバック（Rust 実装） ----
     callback refresh-disks();
     callback refresh-images();
@@ -128,8 +131,10 @@ export component MainWindow inherits Window {
     // 確認待ちのアクション（再起動/電源断はワンクッション置いてから実行する）。
     property <ConfirmAction> confirm-action: ConfirmAction.none;
 
+    property <bool> about-visible: false;
+
     property <bool> menu-actions-enabled: page != Page.installing && busy-count == 0
-        && confirm-action == ConfirmAction.none;
+        && confirm-action == ConfirmAction.none && !about-visible;
     MenuBar {
         Menu {
             title: @tr("Menu");
@@ -143,9 +148,9 @@ export component MainWindow inherits Window {
                 enabled: menu-actions-enabled;
                 activated => { page = Page.terminal; }
             }
-            MenuSeparator { }
             // 再起動/電源断はインストールを中止したい実機ユーザー向け。
             // 開発機で誤操作すると実害があるので release ビルドのみに出す。
+            if !debug-build: MenuSeparator { }
             if !debug-build: MenuItem {
                 title: "🔃 " + @tr("Reboot");
                 enabled: menu-actions-enabled;
@@ -156,7 +161,14 @@ export component MainWindow inherits Window {
                 enabled: menu-actions-enabled;
                 activated => { confirm-action = ConfirmAction.poweroff; }
             }
+            MenuSeparator { }
+            MenuItem {
+                title: "📦 " + @tr("About…");
+                enabled: menu-actions-enabled;
+                activated => { about-visible = true; }
+            }
             // Exit は開発時の脱出ハッチとして busy 中も含め常に有効。
+            if debug-build: MenuSeparator { }
             if debug-build: MenuItem {
                 title: "🚪 " + @tr("Exit");
                 activated => { do-exit(); }
@@ -457,6 +469,60 @@ export component MainWindow inherits Window {
                 Button {
                     text: "⬅ " + @tr("Back");
                     clicked => { page = Page.disk-select; }
+                }
+            }
+        }
+    }
+
+    // ===================== About ダイアログ =====================
+    // Slint の Royalty-Free ライセンスが求める帰属表示（Made with Slint）を兼ねる。
+    if about-visible: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #00000060;
+        TouchArea { }   // 背面への操作を遮断
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 460px;
+            height: about-layout.preferred-height;
+            background: white;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #d0d0d0;
+            about-layout := VerticalBox {
+                padding: 24px;
+                spacing: 8px;
+                Text {
+                    text: "genpack installer";
+                    font-size: 22px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "genpack-install-gui " + app-version;
+                    horizontal-alignment: center;
+                    color: #6b7280;
+                }
+                Text {
+                    text: "© 2026 Walbrix Corporation";
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "https://github.com/wbrxcorp/genpack-install-gui";
+                    horizontal-alignment: center;
+                    color: #3b82f6;
+                }
+                Text {
+                    text: "Made with Slint (https://slint.dev)";
+                    horizontal-alignment: center;
+                }
+                HorizontalBox {
+                    alignment: center;
+                    Button {
+                        text: @tr("Close");
+                        clicked => { about-visible = false; }
+                    }
                 }
             }
         }

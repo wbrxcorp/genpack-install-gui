@@ -76,6 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     window.set_timezone(default_timezone().into());
     window.set_locale(default_locale().into());
     window.set_debug_build(cfg!(debug_assertions));
+    window.set_app_version(env!("CARGO_PKG_VERSION").into());
 
     // 初期データ投入（非同期。完了までは busy オーバーレイが出る）。
     load_disks(&window, &backend, &state);
