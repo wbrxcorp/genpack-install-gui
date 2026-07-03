@@ -126,6 +126,15 @@ export component MainWindow inherits Window {
     property <bool> has-image: selected-image >= 0 && selected-image < images.length;
     property <bool> has-disk: selected-disk >= 0 && selected-disk < disks.length;
 
+    // イメージ選択に伴う派生値の更新は、マウスクリック・矢印キーどちらでも効くよう
+    // selected-image の変化に集約する（クリックハンドラに書くとキー操作で漏れるため）。
+    changed selected-image => {
+        if (selected-image >= 0 && selected-image < images.length) {
+            hostname = images[selected-image].artifact;
+            superfloppy = false;
+        }
+    }
+
     // 補助アクション（システム情報・ターミナル・再起動/電源断）の集約メニュー。
     // 画面下端のボタンから開くドロップダウンは Slint のポップアップ配置調整が
     // 効かず画面外にはみ出したため、上端から下に開く古典的メニューバーにしている。
@@ -138,49 +147,111 @@ export component MainWindow inherits Window {
     property <bool> about-visible: false;
 
     property <bool> menu-actions-enabled: page != Page.installing && busy-count == 0
-        && confirm-action == ConfirmAction.none && !about-visible;
-    MenuBar {
-        Menu {
-            title: @tr("Menu");
-            MenuItem {
-                title: "ℹ " + @tr("System info");
-                enabled: menu-actions-enabled;
-                activated => { load-sysinfo(); page = Page.system-info; }
-            }
-            MenuItem {
-                title: "🖥 " + @tr("Terminal");
-                enabled: menu-actions-enabled;
-                activated => { page = Page.terminal; }
-            }
-            // 再起動/電源断はインストールを中止したい実機ユーザー向け。
-            // 開発機で誤操作すると実害があるので release ビルドのみに出す。
-            if !debug-build: MenuSeparator { }
-            if !debug-build: MenuItem {
-                title: "🔃 " + @tr("Reboot");
-                enabled: menu-actions-enabled;
-                activated => { confirm-action = ConfirmAction.reboot; }
-            }
-            if !debug-build: MenuItem {
-                title: "🔌 " + @tr("Poweroff");
-                enabled: menu-actions-enabled;
-                activated => { confirm-action = ConfirmAction.poweroff; }
-            }
-            MenuSeparator { }
-            MenuItem {
-                title: "📦 " + @tr("About…");
-                enabled: menu-actions-enabled;
-                activated => { about-visible = true; }
-            }
-            // Exit は開発時の脱出ハッチとして busy 中も含め常に有効。
-            if debug-build: MenuSeparator { }
-            if debug-build: MenuItem {
-                title: "🚪 " + @tr("Exit");
-                activated => { do-exit(); }
-            }
-        }
+        && confirm-action == ConfirmAction.none && !about-visible && !menu-visible;
+
+    // ---- 上部メニュー（キーボードで開ける自作オーバーレイ）----
+    // ネイティブ MenuBar はキーボードで開く手段が無いため、F10 / ☰ボタンで開く自作メニューに
+    // した。開閉と項目移動は全体を包む root-focus が一手に扱う（フォーカスが常にそこに在り、
+    // 閉じた後に一覧操作が死ぬ問題が起きない）。項目は debug/release で出し分ける
+    // （reboot/poweroff は release のみ、exit は debug のみ）。
+    property <bool> menu-visible: false;
+    property <int> menu-index: 0;
+    property <[{label: string, id: float}]> menu-items: debug-build
+        ? [
+            { label: "ℹ " + @tr("System info"), id: 0 },
+            { label: "🖥 " + @tr("Terminal"), id: 1 },
+            { label: "📦 " + @tr("About…"), id: 4 },
+            { label: "🚪 " + @tr("Exit"), id: 5 },
+        ]
+        : [
+            { label: "ℹ " + @tr("System info"), id: 0 },
+            { label: "🖥 " + @tr("Terminal"), id: 1 },
+            { label: "🔃 " + @tr("Reboot"), id: 2 },
+            { label: "🔌 " + @tr("Poweroff"), id: 3 },
+            { label: "📦 " + @tr("About…"), id: 4 },
+        ];
+
+    // メニュー項目 id → アクション。
+    function activate-menu-item(id: float) {
+        menu-visible = false;
+        if (id == 0) { load-sysinfo(); page = Page.system-info; }
+        else if (id == 1) { page = Page.terminal; }
+        else if (id == 2) { confirm-action = ConfirmAction.reboot; }
+        else if (id == 3) { confirm-action = ConfirmAction.poweroff; }
+        else if (id == 4) { about-visible = true; }
+        else if (id == 5) { do-exit(); }
     }
 
-    VerticalLayout {
+    // 画面・モーダル状態が変わるたびに root-focus へフォーカスを戻す。
+    // これでモーダルを開いた瞬間からキー操作が root-focus に届き（LineEdit にフォーカスが
+    // 残っていても奪い返す）、閉じた後もフォーカスが宙に浮かず一覧操作が復帰する。
+    changed page => { root-focus.focus(); }
+    changed menu-visible => { root-focus.focus(); }
+    changed about-visible => { root-focus.focus(); }
+    changed confirm-action => { root-focus.focus(); }
+
+    // 全ページを包む単一の FocusScope。一覧の矢印操作もメニューの開閉/操作もここで扱う。
+    // フォーカスは常にここに在るため、テキスト入力欄（オプション画面）は Tab で入って使う。
+    root-focus := FocusScope {
+        init => { root-focus.focus(); }
+        key-pressed(event) => {
+            // --- メニューが開いている間 ---
+            if (menu-visible) {
+                if (event.text == Key.Escape) { menu-visible = false; return accept; }
+                if (event.text == Key.UpArrow) {
+                    if (menu-index > 0) { menu-index -= 1; }
+                    return accept;
+                }
+                if (event.text == Key.DownArrow) {
+                    if (menu-index < menu-items.length - 1) { menu-index += 1; }
+                    return accept;
+                }
+                if (event.text == Key.Return) {
+                    activate-menu-item(menu-items[menu-index].id);
+                    return accept;
+                }
+                return accept; // 開いている間は他キーを吸う
+            }
+            // --- About ダイアログ（Enter/Esc で閉じる）---
+            if (about-visible) {
+                if (event.text == Key.Escape || event.text == Key.Return) { about-visible = false; }
+                return accept;
+            }
+            // --- 確認ダイアログ（Enter=実行 / Esc=取消）---
+            if (confirm-action != ConfirmAction.none) {
+                if (event.text == Key.Escape) { confirm-action = ConfirmAction.none; return accept; }
+                if (event.text == Key.Return) {
+                    if (confirm-action == ConfirmAction.reboot) { do-reboot(); } else { do-poweroff(); }
+                    confirm-action = ConfirmAction.none;
+                    return accept;
+                }
+                return accept; // 開いている間は他キーを吸う
+            }
+            // --- F10 でメニューを開く ---
+            if (event.text == Key.F10 && menu-actions-enabled) {
+                menu-index = 0;
+                menu-visible = true;
+                return accept;
+            }
+            // --- ディスク選択のキーボード操作 ---
+            if (page == Page.disk-select) {
+                if (event.text == Key.UpArrow) { if (selected-disk > 0) { selected-disk -= 1; } return accept; }
+                if (event.text == Key.DownArrow) { if (selected-disk < disks.length - 1) { selected-disk += 1; } return accept; }
+                if (event.text == Key.Home) { if (disks.length > 0) { selected-disk = 0; } return accept; }
+                if (event.text == Key.End) { if (disks.length > 0) { selected-disk = disks.length - 1; } return accept; }
+                if (event.text == Key.Return) { if (has-disk) { page = Page.image-select; } return accept; }
+            }
+            // --- イメージ選択のキーボード操作 ---
+            if (page == Page.image-select) {
+                if (event.text == Key.UpArrow) { if (selected-image > 0) { selected-image -= 1; } return accept; }
+                if (event.text == Key.DownArrow) { if (selected-image < images.length - 1) { selected-image += 1; } return accept; }
+                if (event.text == Key.Home) { if (images.length > 0) { selected-image = 0; } return accept; }
+                if (event.text == Key.End) { if (images.length > 0) { selected-image = images.length - 1; } return accept; }
+                if (event.text == Key.Return) { if (has-image) { page = Page.options; } return accept; }
+            }
+            return reject;
+        }
+        VerticalLayout {
         // ===================== ディスク選択 =====================
         if page == Page.disk-select: VerticalLayout {
             HeaderBar { title: @tr("Select installation target disk"); }
@@ -191,6 +262,7 @@ export component MainWindow inherits Window {
                     text: @tr("Choose the disk to install to. All data on it will be erased.");
                     color: #b91c1c;
                 }
+                // 一覧のキーボード操作（矢印/Enter）は全体を包む root-focus で扱う。
                 ListView {
                     vertical-stretch: 1;
                     for disk[idx] in disks: SelectRow {
@@ -229,17 +301,15 @@ export component MainWindow inherits Window {
             VerticalBox {
                 padding: 20px;
                 spacing: 12px;
+                // 一覧のキーボード操作（矢印/Enter）は全体を包む root-focus で扱う。
                 ListView {
                     vertical-stretch: 1;
                     for img[idx] in images: SelectRow {
                         selected: idx == selected-image;
                         // arch 不一致でも選択・インストールは可能にする（別アーキ向けに
                         // インストールする用途があるため）。注意喚起は下の警告のみ。
-                        clicked => {
-                            selected-image = idx;
-                            hostname = img.artifact;
-                            superfloppy = false;
-                        }
+                        // 派生値(hostname 等)の更新は changed selected-image に集約。
+                        clicked => { selected-image = idx; }
                         VerticalLayout {
                             spacing: 2px;
                             Text {
@@ -503,6 +573,65 @@ export component MainWindow inherits Window {
                 Button {
                     text: "⬅ " + @tr("Back");
                     clicked => { page = Page.disk-select; }
+                }
+            }
+        }
+    }
+    }
+
+    // ☰ メニューを開くトリガ（マウス用。キーボードは F10）。上部バー右端に浮かせる。
+    if menu-actions-enabled: Rectangle {
+        x: parent.width - self.width - 8px;
+        y: 8px;
+        width: 92px;
+        height: 40px;
+        border-radius: 6px;
+        background: menu-touch.has-hover ? #374151 : #2b3648;
+        Text {
+            text: "☰ F10";
+            color: white;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            font-size: 15px;
+        }
+        menu-touch := TouchArea {
+            clicked => { menu-index = 0; menu-visible = true; }
+        }
+    }
+
+    // ===================== メニュー（自作オーバーレイ）=====================
+    if menu-visible: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #00000060;
+        TouchArea { clicked => { menu-visible = false; } }   // 外側クリックで閉じる
+        Rectangle {
+            x: parent.width - self.width - 8px;
+            y: 8px;
+            width: 280px;
+            height: menu-card-layout.preferred-height;
+            background: white;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #d0d0d0;
+            menu-card-layout := VerticalLayout {
+                padding: 6px;
+                for item[idx] in menu-items: Rectangle {
+                    height: 42px;
+                    border-radius: 6px;
+                    background: (idx == menu-index || row-touch.has-hover) ? #eef4ff : white;
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        Text {
+                            text: item.label;
+                            vertical-alignment: center;
+                            font-size: 16px;
+                        }
+                    }
+                    row-touch := TouchArea {
+                        clicked => { activate-menu-item(item.id); }
+                    }
                 }
             }
         }
