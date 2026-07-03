@@ -97,9 +97,13 @@ export component MainWindow inherits Window {
     // （例: 起動直後のディスク一覧とイメージ一覧の同時取得）。
     in-out property <int> busy-count: 0;
 
-    in property <float> progress;           // 0.0 .. 1.0
-    in property <string> progress-message;
-    in property <string> install-error;     // 空なら成功
+    in property <float> progress;            // 0.0 .. 1.0（進捗率が読める操作でのみ意味を持つ）
+    in property <int> install-step;          // 現ステップ (1-based)
+    in property <int> install-total-steps;   // 総ステップ数
+    in property <string> install-step-indicator; // 済み■/未□ の並び（Rust 側で生成）
+    in property <string> install-step-message;   // 現ステップの説明
+    in property <bool> install-has-progress;     // Progress バーを出すか（進捗率が読めるとき）
+    in property <string> install-error;      // 空なら成功
     in property <string> sysinfo-text;
 
     // debug ビルドか（Rust 側から cfg!(debug_assertions) を流し込む）。
@@ -229,7 +233,8 @@ export component MainWindow inherits Window {
                     vertical-stretch: 1;
                     for img[idx] in images: SelectRow {
                         selected: idx == selected-image;
-                        enabled: img.arch-match;
+                        // arch 不一致でも選択・インストールは可能にする（別アーキ向けに
+                        // インストールする用途があるため）。注意喚起は下の警告のみ。
                         clicked => {
                             selected-image = idx;
                             hostname = img.artifact;
@@ -248,8 +253,8 @@ export component MainWindow inherits Window {
                                 color: #6b7280;
                             }
                             if !img.arch-match: Text {
-                                text: @tr("Architecture does not match this machine — cannot install");
-                                color: #b91c1c;
+                                text: "⚠ " + @tr("Architecture differs from this machine (installing anyway)");
+                                color: #b45309;
                             }
                         }
                     }
@@ -360,23 +365,52 @@ export component MainWindow inherits Window {
                     font-size: 18px;
                     horizontal-alignment: center;
                 }
-                // シンプルな自作プログレスバー。
-                Rectangle {
-                    height: 24px;
-                    border-radius: 12px;
-                    background: #e5e7eb;
-                    Rectangle {
-                        x: 0;
-                        width: parent.width * progress;
-                        height: parent.height;
-                        border-radius: 12px;
-                        background: #3b82f6;
+
+                // ステップ表示: 「Step X/N ■■□□…」＋ 現ステップの説明。
+                // 進捗率の読めない操作（parted/mkfs 等）はここまでで、Progress バーは出さない。
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 12px;
+                    Text {
+                        text: @tr("Step {}/{}", install-step, install-total-steps);
+                        font-size: 16px;
+                        vertical-alignment: center;
+                        color: #374151;
+                    }
+                    Text {
+                        text: install-step-indicator;
+                        font-size: 16px;
+                        vertical-alignment: center;
+                        color: #3b82f6;
                     }
                 }
                 Text {
-                    text: Math.round(progress * 100) + "%   " + progress-message;
+                    text: install-step-message + "…";
                     horizontal-alignment: center;
-                    color: #374151;
+                    font-size: 15px;
+                    color: #111827;
+                }
+
+                // 進捗率の分かる操作（システムイメージのコピー）のときだけ Progress バーを出す。
+                if install-has-progress: VerticalLayout {
+                    spacing: 8px;
+                    Rectangle {
+                        height: 24px;
+                        border-radius: 12px;
+                        background: #e5e7eb;
+                        Rectangle {
+                            x: 0;
+                            width: parent.width * progress;
+                            height: parent.height;
+                            border-radius: 12px;
+                            background: #3b82f6;
+                        }
+                    }
+                    Text {
+                        text: Math.round(progress * 100) + "%";
+                        horizontal-alignment: center;
+                        color: #374151;
+                    }
                 }
             }
         }

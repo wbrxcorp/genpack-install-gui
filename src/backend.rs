@@ -96,9 +96,23 @@ pub struct SystemInfo {
     pub kernel: String,
 }
 
-/// インストール進捗コールバックの引数。
-/// `fraction` は 0.0..=1.0、`message` は現在のステップの説明。
-pub type ProgressFn<'a> = dyn Fn(f32, &str) + 'a;
+/// インストール進捗の 1 回分の報告。
+///
+/// インストールは性質の異なる操作の連なりで、進捗の見せ方を 2 層に分ける:
+///   - `step` / `total`: 「Step X/N」のステップ表示（1-based）。
+///   - `message`: 現在のステップの説明。
+///   - `fraction`: 進捗率が読める操作（システムイメージのコピー）でのみ `Some(0.0..=1.0)`。
+///     parted / mkfs のように進捗の読めない操作では `None`（UI 側は Progress バーを出さない）。
+pub struct Progress<'a> {
+    pub step: usize,
+    pub total: usize,
+    pub message: &'a str,
+    pub fraction: Option<f32>,
+}
+
+/// インストール進捗コールバック。各ステップの開始時、および進捗率の分かる操作の
+/// 途中で繰り返し呼ばれる。
+pub type ProgressFn<'a> = dyn Fn(&Progress) + 'a;
 
 pub trait InstallerBackend: Send + Sync {
     /// インストール先候補ディスクの一覧。

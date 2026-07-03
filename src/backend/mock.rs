@@ -10,8 +10,8 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use super::{
-    host_arch, DiskInfo, ImageMetadata, InstallOptions, InstallerBackend, ProgressFn, Result,
-    SystemInfo,
+    host_arch, DiskInfo, ImageMetadata, InstallOptions, InstallerBackend, Progress, ProgressFn,
+    Result, SystemInfo,
 };
 
 pub struct MockBackend;
@@ -116,29 +116,49 @@ impl InstallerBackend for MockBackend {
     }
 
     fn install(&self, opts: &InstallOptions, progress: &ProgressFn) -> Result<()> {
-        let steps: &[(&str, u64)] = &[
-            ("Detecting disk geometry", 300),
-            if opts.superfloppy {
-                ("Formatting whole disk as FAT32 (superfloppy)", 700)
-            } else {
-                ("Creating partitions (FAT32 boot + BTRFS data)", 700)
-            },
-            ("Formatting boot partition (FAT32)", 500),
-            ("Formatting data partition (BTRFS)", 500),
-            ("Installing bootloader", 600),
-            ("Copying boot files", 500),
-            ("Copying system image", 1500),
-            ("Writing system configuration", 300),
-            ("Syncing", 400),
-        ];
+        // real バックエンドと同じステップ構成にして UI の見え方を揃える。
+        // superfloppy はパーティションを作らずディスク全体を FAT32 にするので
+        // 「Creating partitions」「Formatting data partition」が無い（6 ステップ）。
+        // (説明, 所要ms, コピーステップか) の並び。
+        let mut steps: Vec<(&str, u64, bool)> = vec![("Checking system image", 300, false)];
+        if opts.superfloppy {
+            steps.push(("Formatting disk (FAT32)", 700, false));
+        } else {
+            steps.push(("Creating partitions", 700, false));
+            steps.push(("Formatting boot partition (FAT32)", 500, false));
+            steps.push(("Formatting data partition (BTRFS)", 500, false));
+        }
+        steps.push(("Installing bootloader", 600, false));
+        steps.push(("Copying system image", 1500, true));
+        steps.push(("Writing configuration", 300, false));
+        steps.push(("Syncing", 400, false));
 
         let total = steps.len();
-        for (i, (msg, delay)) in steps.iter().enumerate() {
-            // ステップ開始時点の進捗を報告してから作業（スリープ）する。
-            progress(i as f32 / total as f32, msg);
-            sleep(Duration::from_millis(*delay));
+        for (i, (msg, delay, is_copy)) in steps.iter().enumerate() {
+            let step = i + 1;
+            if *is_copy {
+                // 進捗率の分かる操作。fraction を刻んで Progress バーを動かす。
+                let ticks = 20u64;
+                for t in 0..=ticks {
+                    progress(&Progress {
+                        step,
+                        total,
+                        message: msg,
+                        fraction: Some(t as f32 / ticks as f32),
+                    });
+                    sleep(Duration::from_millis(delay / ticks));
+                }
+            } else {
+                // 進捗率の読めない操作。ステップ開始を報告してから作業（スリープ）する。
+                progress(&Progress {
+                    step,
+                    total,
+                    message: msg,
+                    fraction: None,
+                });
+                sleep(Duration::from_millis(*delay));
+            }
         }
-        progress(1.0, "Installation complete");
         Ok(())
     }
 

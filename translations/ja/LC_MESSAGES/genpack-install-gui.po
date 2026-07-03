@@ -31,8 +31,8 @@ msgstr "次へ"
 msgid "Select image to install"
 msgstr "インストールするイメージの選択"
 
-msgid "Architecture does not match this machine — cannot install"
-msgstr "アーキテクチャがこのマシンと一致しません — インストールできません"
+msgid "Architecture differs from this machine (installing anyway)"
+msgstr "アーキテクチャがこのマシンと異なります（このままインストールします）"
 
 msgid "Back"
 msgstr "戻る"

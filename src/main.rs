@@ -214,7 +214,10 @@ fn wire_install(window: &MainWindow, backend: Arc<dyn InstallerBackend>, state: 
         // インストール中画面へ。
         win.set_install_error("".into());
         win.set_progress(0.0);
-        win.set_progress_message("".into());
+        win.set_install_step(0);
+        win.set_install_total_steps(0);
+        win.set_install_step_message("".into());
+        win.set_install_has_progress(false);
         win.set_page(Page::Installing);
 
         let backend = backend.clone();
@@ -222,13 +225,29 @@ fn wire_install(window: &MainWindow, backend: Arc<dyn InstallerBackend>, state: 
         std::thread::spawn(move || {
             // 進捗は UI スレッドへ戻して反映する。
             let w_prog = w2.clone();
-            let progress = move |frac: f32, msg: &str| {
-                let msg = msg.to_string();
+            let progress = move |p: &backend::Progress| {
+                let step = p.step as i32;
+                let total = p.total as i32;
+                let msg = p.message.to_string();
+                let fraction = p.fraction;
+                // ステップインジケータ（済み ■ / 未 □）を組む。■/□ は noto-cjk にグリフあり。
+                let indicator: String =
+                    "■".repeat(p.step) + &"□".repeat(p.total.saturating_sub(p.step));
                 let w_prog = w_prog.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(win) = w_prog.upgrade() {
-                        win.set_progress(frac);
-                        win.set_progress_message(msg.into());
+                        win.set_install_step(step);
+                        win.set_install_total_steps(total);
+                        win.set_install_step_indicator(indicator.into());
+                        win.set_install_step_message(msg.into());
+                        // 進捗率が読める操作のときだけ Progress バーを出す。
+                        match fraction {
+                            Some(f) => {
+                                win.set_install_has_progress(true);
+                                win.set_progress(f);
+                            }
+                            None => win.set_install_has_progress(false),
+                        }
                     }
                 });
             };
