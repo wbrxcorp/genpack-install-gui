@@ -35,6 +35,14 @@ fn make_backend() -> Arc<dyn InstallerBackend> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // --wait-for-display: 接続済みディスプレイが現れるまでブロックしてから起動する。
+    // Slint(linuxkms) が要求する「Connected なコネクタ＋有効モード」を sysfs で先回り確認し、
+    // ディスプレイ認識前に起動して即クラッシュするのを防ぐ（KMS 自動起動用）。
+    // Slint 初期化より前に行う必要があるので main の先頭で処理する。
+    if std::env::args().any(|a| a == "--wait-for-display") {
+        wait_for_display_ready();
+    }
+
     // ロケールが ja_* なら日本語、それ以外は英語（バンドル翻訳の既定＝英語ソース）。
     // システムロケールからの自動選択は Slint が起動時に行うため通常は不要だが、
     // KMS 環境などで確実に効かせるため $LANG を見て明示指定する。
@@ -391,6 +399,41 @@ fn desired_kms_scale() -> Option<f32> {
     let scale = ((h as f32 / DESIGN_HEIGHT).clamp(1.0, 4.0) * 100.0).round() / 100.0;
     eprintln!("[genpack-install-gui] KMS display {w}x{h} -> scale factor {scale}");
     Some(scale)
+}
+
+/// 接続済みディスプレイ（Slint linuxkms が起動できる状態）が現れるまでブロックする。
+///
+/// Slint の linuxkms バックエンドは起動時に `state()==Connected` のコネクタを探し
+/// （`drmoutput.rs`）、無ければ "No connected display connector found" で失敗する。加えて
+/// そのコネクタに有効なモードが必要。ここではその条件を、DRM マスターを取らずに sysfs
+/// (`/sys/class/drm/*/status` と `modes`) で先回りポーリングする。`primary_drm_resolution()`
+/// が Some を返す条件（接続済み＋モードあり）が、そのまま「Slint が起動に成功する条件」と
+/// 一致する。ディスプレイの認識が起動より遅れても認識完了まで待つので、KMS 自動起動時の
+/// 起動即クラッシュを防げる。
+///
+/// なお GPU/ドライバ自体の不備（EGL 初期化失敗など）は待っても直らない別問題であり、
+/// 本関数の対象外（接続タイミングの競合のみを解消する）。
+fn wait_for_display_ready() {
+    let start = std::time::Instant::now();
+    let mut last_log: Option<std::time::Instant> = None;
+    loop {
+        if primary_drm_resolution().is_some() {
+            if last_log.is_some() {
+                eprintln!(
+                    "[genpack-install-gui] display ready after {:.1}s",
+                    start.elapsed().as_secs_f32()
+                );
+            }
+            return;
+        }
+        // 待機開始時と、その後およそ 10 秒ごとに 1 行だけ出す。
+        let now = std::time::Instant::now();
+        if last_log.is_none_or(|t| now.duration_since(t).as_secs() >= 10) {
+            eprintln!("[genpack-install-gui] waiting for a connected display...");
+            last_log = Some(now);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
 }
 
 /// 接続済み DRM コネクタの中から、最も解像度の高い（＝主）ディスプレイの物理解像度を返す。
