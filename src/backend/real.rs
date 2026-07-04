@@ -663,6 +663,11 @@ fn install_bios_bootloader(
 /// 無しで並べる。キー名は genpack-init の設定モジュールで確認済み:
 ///   hostname / timezone(zoneinfo パス) / locale(LANG 値)。空欄のキーは書かない。
 fn write_system_ini(boot_mnt: &Path, opts: &InstallOptions) -> Result<()> {
+    // genpack-init は configparser（BasicInterpolation）で読むため、値中の生 '%' は
+    // '%%' にエスケープする。生 '%' が混ざると system.ini 全体のパースが飛び、hostname
+    // 等も含め全設定が無効化される（SSH 鍵に '%' はまず無いが安価な保険）。
+    let esc = |s: &str| s.replace('%', "%%");
+
     let mut body = String::new();
     for (key, value) in [
         ("hostname", opts.hostname.trim()),
@@ -670,9 +675,26 @@ fn write_system_ini(boot_mnt: &Path, opts: &InstallOptions) -> Result<()> {
         ("locale", opts.locale.trim()),
     ] {
         if !value.is_empty() {
-            body.push_str(&format!("{key}={value}\n"));
+            body.push_str(&format!("{key}={}\n", esc(value)));
         }
     }
+
+    // ssh_pubkey は複数鍵可。空行・# 行を除いた各鍵を、1 本目は `ssh_pubkey=` に続けて、
+    // 2 本目以降は INI の継続行（インデント）で並べる（genpack-init-sshd が splitlines で
+    // 各鍵に分割して root 等の authorized_keys へ配布する）。
+    let keys: Vec<&str> = opts
+        .ssh_pubkey
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    if let Some((first, rest)) = keys.split_first() {
+        body.push_str(&format!("ssh_pubkey={}\n", esc(first)));
+        for k in rest {
+            body.push_str(&format!("    {}\n", esc(k)));
+        }
+    }
+
     if body.is_empty() {
         return Ok(());
     }

@@ -84,6 +84,8 @@ pub struct InstallOptions {
     pub timezone: String,
     pub locale: String,
     pub hostname: String,
+    /// インストール先の root に引き継ぐ SSH 公開鍵（複数可、1 行 1 鍵）。空なら書かない。
+    pub ssh_pubkey: String,
 }
 
 /// 実行環境のシステム情報（root 不要）。

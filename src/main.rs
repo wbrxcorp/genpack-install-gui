@@ -83,6 +83,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 実行環境の既定値をプリセット。
     window.set_timezone(default_timezone().into());
     window.set_locale(default_locale().into());
+    // インストーラ環境の root の SSH 鍵をインストール先へ引き継ぐ初期値にする。
+    // 鍵があればチェックオン＋プリフィル、無ければチェックオフ（＝入力不要のサイン）。
+    let ssh_keys = default_authorized_keys();
+    window.set_install_ssh_key(!ssh_keys.is_empty());
+    window.set_ssh_pubkey(ssh_keys.into());
     window.set_debug_build(cfg!(debug_assertions));
     window.set_app_version(env!("CARGO_PKG_VERSION").into());
 
@@ -215,6 +220,12 @@ fn wire_install(window: &MainWindow, backend: Arc<dyn InstallerBackend>, state: 
             timezone: win.get_timezone().to_string(),
             locale: win.get_locale().to_string(),
             hostname: win.get_hostname().to_string(),
+            // チェックが外れていれば引き継がない（空文字＝system.ini に書かない）。
+            ssh_pubkey: if win.get_install_ssh_key() {
+                win.get_ssh_pubkey().to_string()
+            } else {
+                String::new()
+            },
         };
         drop(images);
         drop(disks);
@@ -369,6 +380,19 @@ fn default_locale() -> String {
         }
     }
     "C".to_string()
+}
+
+/// インストーラ実行環境の root の `authorized_keys` を読み、インストール先へ引き継ぐ
+/// SSH 公開鍵の初期値にする（空行・`#` 行は除く。読めなければ空）。
+/// インストーラは root で動くので読める。dev/mock（非 root）では読めず空になる。
+fn default_authorized_keys() -> String {
+    std::fs::read_to_string("/root/.ssh/authorized_keys")
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// 目標とする論理画面高さ(px)。物理解像度によらずこの高さになるようスケールを決める。

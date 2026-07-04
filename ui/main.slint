@@ -1,4 +1,4 @@
-import { Button, VerticalBox, HorizontalBox, ListView, LineEdit, CheckBox, ScrollView, GroupBox, Spinner } from "std-widgets.slint";
+import { Button, VerticalBox, HorizontalBox, ListView, LineEdit, TextEdit, CheckBox, ScrollView, GroupBox, Spinner } from "std-widgets.slint";
 
 // Rust 側と共有するデータ構造。
 export struct DiskInfo {
@@ -91,6 +91,10 @@ export component MainWindow inherits Window {
     in-out property <string> timezone;
     in-out property <string> locale;
     in-out property <bool> superfloppy;
+    // SSH 公開鍵の引き継ぎ。鍵の有無に応じて Rust が起動時に設定する
+    // （鍵あり→チェックオン＋プリフィル、無し→チェックオフ＝入力不要のサイン）。
+    in-out property <bool> install-ssh-key: false;
+    in-out property <string> ssh-pubkey;
 
     // 実行中の非同期処理の数。0 より大きい間は busy オーバーレイで操作を遮断する。
     // bool でなくカウンタなのは、複数の処理が重なり得るため
@@ -403,6 +407,28 @@ export component MainWindow inherits Window {
                                 spacing: 12px;
                                 Text { width: 120px; vertical-alignment: center; text: @tr("Locale"); }
                                 LineEdit { text <=> locale; }
+                            }
+                        }
+                    }
+
+                    GroupBox {
+                        title: @tr("SSH access");
+                        VerticalLayout {
+                            spacing: 6px;
+                            CheckBox {
+                                text: @tr("Install SSH key(s) for root (carried over from this installer)");
+                                checked <=> install-ssh-key;
+                            }
+                            TextEdit {
+                                text <=> ssh-pubkey;
+                                enabled: install-ssh-key;   // オフでグレー化
+                                height: 90px;
+                            }
+                            Text {
+                                text: @tr("These keys can log in as root on the installed system.");
+                                color: #6b7280;
+                                font-size: 12px;
+                                wrap: word-wrap;
                             }
                         }
                     }
