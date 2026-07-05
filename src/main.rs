@@ -177,7 +177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// アプリ内ターミナル（slint-terminal クレート）を結線する。
 ///
 /// 端末実体は Page::Terminal に居る間だけ遅延生成し、離脱・シェル終了で破棄する
-/// （root シェルを常駐させない）。描画は 16ms タイマ（UI スレッド）で完結し、
+/// （root シェルを常駐させない）。描画は 33ms(30fps) タイマ（UI スレッド）で完結し、
 /// 既存の run_busy/invoke_from_event_loop パターンとは独立に動く。
 /// 返り値のタイマは呼び出し側で生存させること（drop すると停止する）。
 fn wire_terminal(window: &MainWindow) -> slint::Timer {
@@ -209,9 +209,9 @@ fn wire_terminal(window: &MainWindow) -> slint::Timer {
         // （＝Wayland）と判定し、以降ソフトリピートを恒久停止する（二重連射の防止）。
         platform_autorepeat: bool,
     }
-    // 16ms tick 換算。初回リピートまで ~350ms、以降 ~48ms 間隔。
-    const REPEAT_INITIAL_DELAY_TICKS: u32 = 22;
-    const REPEAT_INTERVAL_TICKS: u32 = 3;
+    // 33ms tick 換算。初回リピートまで ~350ms、以降 ~66ms 間隔。
+    const REPEAT_INITIAL_DELAY_TICKS: u32 = 11;
+    const REPEAT_INTERVAL_TICKS: u32 = 2;
     let repeat: Rc<RefCell<Repeat>> = Rc::new(RefCell::new(Repeat::default()));
 
     // キー入力 → PTY。名前付き/方向/Ctrl/Alt は key_to_bytes が VT/C0 へ変換（未対応は None）。
@@ -258,7 +258,10 @@ fn wire_terminal(window: &MainWindow) -> slint::Timer {
         let w = window.as_weak();
         timer.start(
             slint::TimerMode::Repeated,
-            std::time::Duration::from_millis(16),
+            // 30fps（33ms）。連続出力時に効くコストは Slint 側の present（テクスチャ
+            // アップロード＋コンポジット）で、そこを 60→30fps に間引くと QEMU/実機の
+            // ソフト GPU 負荷が半減する。端末は 30fps で十分読める（AIちゃんねる計測より）。
+            std::time::Duration::from_millis(33),
             move || {
                 let Some(win) = w.upgrade() else { return };
                 let mut guard = term.borrow_mut();
