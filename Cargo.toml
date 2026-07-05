@@ -5,6 +5,9 @@ edition = "2024"
 
 [dependencies]
 slint = { version = "1", features = ["backend-winit", "backend-linuxkms"] }
+# アプリ内ターミナル（生KMSでも動くよう RGBA→slint::Image で描画する別クレート）。
+# タグ未発行のため rev で固定し、Cargo.lock をコミットして再現性を担保する。
+slint-terminal = { git = "https://github.com/wbrxcorp/slint-terminal", rev = "dc3c008114a1aefb863fa84186b266405dd3a395" }
 
 [build-dependencies]
 slint-build = "1"

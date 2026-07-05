@@ -126,3 +126,6 @@ msgstr "このアプリについて…"
 
 msgid "Close"
 msgstr "閉じる"
+
+msgid "exit or Ctrl-D to quit"
+msgstr "exit または Ctrl-D で終了"

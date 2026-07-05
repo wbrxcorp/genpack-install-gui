@@ -60,15 +60,28 @@ component SelectRow inherits Rectangle {
 
 component HeaderBar inherits Rectangle {
     in property <string> title;
+    in property <string> hint;   // タイトル右に添える補助テキスト（空なら何も出ない）
     height: 56px;
     background: #1f2937;
-    Text {
-        x: 20px;
-        vertical-alignment: center;
-        text: title;
-        color: white;
-        font-size: 20px;
-        font-weight: 700;
+    HorizontalLayout {
+        padding-left: 20px;
+        padding-right: 20px;
+        spacing: 12px;
+        Text {
+            vertical-alignment: center;
+            text: title;
+            color: white;
+            font-size: 20px;
+            font-weight: 700;
+        }
+        // hint はタイトルのすぐ右に添える（右上の ☰ ボタンと干渉させない）。
+        Text {
+            vertical-alignment: center;
+            text: hint;
+            color: #9ca3af;
+            font-size: 14px;
+        }
+        Rectangle { }   // スペーサ: 余白を吸って title+hint を左に寄せる
     }
 }
 
@@ -83,6 +96,13 @@ export component MainWindow inherits Window {
 
     in property <[DiskInfo]> disks;
     in property <[ImageInfo]> images;
+
+    // ---- ターミナル（slint-terminal クレート）----
+    // Rust 側が毎フレーム描画済み RGBA を term-frame へ流し込む。キー入力は term-key で
+    // PTY へ転送。グリッドサイズは Rust がウィンドウ物理サイズから毎tick算出して追従する。
+    in property <image> term-frame;
+    callback term-key(string, bool, bool);        // text, ctrl, alt
+    callback term-key-released(string);           // KMS用ソフトキーリピートの停止判定に使う
 
     in-out property <int> selected-disk: -1;
     in-out property <int> selected-image: -1;
@@ -237,6 +257,13 @@ export component MainWindow inherits Window {
                 menu-visible = true;
                 return accept;
             }
+            // --- ターミナル: 全キーを PTY へ転送 ---
+            // メニュー/ダイアログ判定（上記）を通り抜けた通常時のみ。F10 は上で先に拾うので
+            // メニューが「端末から抜ける」脱出口になる（Esc は VT シーケンスなので奪わない）。
+            if (page == Page.terminal) {
+                root.term-key(event.text, event.modifiers.control, event.modifiers.alt);
+                return accept;
+            }
             // --- ディスク選択のキーボード操作 ---
             if (page == Page.disk-select) {
                 if (event.text == Key.UpArrow) { if (selected-disk > 0) { selected-disk -= 1; } return accept; }
@@ -253,6 +280,11 @@ export component MainWindow inherits Window {
                 if (event.text == Key.End) { if (images.length > 0) { selected-image = images.length - 1; } return accept; }
                 if (event.text == Key.Return) { if (has-image) { page = Page.options; } return accept; }
             }
+            return reject;
+        }
+        // 端末のソフトキーリピート停止用（KMS はキーリピートを合成しないため Rust 側で補う）。
+        key-released(event) => {
+            if (page == Page.terminal) { root.term-key-released(event.text); return accept; }
             return reject;
         }
         VerticalLayout {
@@ -577,28 +609,21 @@ export component MainWindow inherits Window {
             }
         }
 
-        // ===================== ターミナル（プレースホルダ） =====================
+        // ===================== ターミナル（slint-terminal）=====================
+        // キー入力は root-focus が term-key で PTY へ転送。シェルを `exit` すると Rust 側
+        // on_exit がページを戻す（F10 メニューからの離脱も可）。
         if page == Page.terminal: VerticalLayout {
-            HeaderBar { title: @tr("Terminal"); }
-            VerticalBox {
-                padding: 20px;
-                spacing: 12px;
-                alignment: center;
-                Text {
-                    text: @tr("Terminal is not implemented yet.");
-                    font-size: 18px;
-                    horizontal-alignment: center;
-                }
-                Text {
-                    // README「ターミナル画面」に基づく将来実装の説明。
-                    text: @tr("Planned: PTY + alacritty-terminal + fontdue rendered onto a Slint Image. Type 'exit' to return.");
-                    horizontal-alignment: center;
-                    color: #6b7280;
-                    wrap: word-wrap;
-                }
-                Button {
-                    text: "⬅ " + @tr("Back");
-                    clicked => { page = Page.disk-select; }
+            HeaderBar {
+                title: @tr("Terminal");
+                hint: @tr("exit or Ctrl-D to quit");
+            }
+            Rectangle {
+                background: black;
+                Image {
+                    source: root.term-frame;
+                    image-rendering: pixelated;   // テキストなので 1:1、平滑化しない
+                    width: 100%;
+                    height: 100%;
                 }
             }
         }

@@ -5,9 +5,12 @@
 
 mod backend;
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use backend::{InstallOptions, InstallerBackend, SystemInfo};
+use slint_terminal::{slint_glue, Terminal};
 
 slint::include_modules!();
 
@@ -164,9 +167,166 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = slint::quit_event_loop();
     });
     wire_install(&window, backend.clone(), state.clone());
+    // 端末の駆動タイマは run() の間だけ生かす必要があるため main のスコープに束縛して持つ。
+    let _term_timer = wire_terminal(&window);
 
     window.run()?;
     Ok(())
+}
+
+/// アプリ内ターミナル（slint-terminal クレート）を結線する。
+///
+/// 端末実体は Page::Terminal に居る間だけ遅延生成し、離脱・シェル終了で破棄する
+/// （root シェルを常駐させない）。描画は 16ms タイマ（UI スレッド）で完結し、
+/// 既存の run_busy/invoke_from_event_loop パターンとは独立に動く。
+/// 返り値のタイマは呼び出し側で生存させること（drop すると停止する）。
+fn wire_terminal(window: &MainWindow) -> slint::Timer {
+    /// HeaderBar の高さ（ui/main.slint と一致させる）。端末描画領域はこの下の全域。
+    const HEADER_LOGICAL_H: f32 = 56.0;
+
+    /// 端末描画領域の物理ピクセルサイズ（ウィンドウ全体 − ヘッダ）。
+    fn terminal_area_px(win: &MainWindow) -> (u32, u32) {
+        let scale = win.window().scale_factor();
+        let sz = win.window().size(); // 物理ピクセル
+        let header = (HEADER_LOGICAL_H * scale) as u32;
+        (sz.width, sz.height.saturating_sub(header))
+    }
+
+    let term: Rc<RefCell<Option<Terminal>>> = Rc::new(RefCell::new(None));
+
+    // KMS 用ソフトキーリピートの状態。Slint の linuxkms バックエンドは libinput の
+    // Pressed/Released をそのまま流すだけでリピートを合成しない（Wayland はコンポジタが合成）。
+    // そこで「押下のたびに delay を初期値へ戻す」方式でリピートを補う。こうすると Wayland では
+    // コンポジタ由来の連射が毎回 delay をリセットするためソフトリピートは発火せず、KMS
+    // （連射なし）でだけ delay 消化後に発火する ＝ プラットフォーム判定が要らない。
+    #[derive(Default)]
+    struct Repeat {
+        bytes: Vec<u8>, // リピート対象の入力バイト列
+        key: String,    // 押下中のキー text（release 判定用）
+        active: bool,
+        delay: u32, // 次のリピートまでの残 tick
+        // 同一キーが release を挟まず再入したら「プラットフォームが自前でリピートしている」
+        // （＝Wayland）と判定し、以降ソフトリピートを恒久停止する（二重連射の防止）。
+        platform_autorepeat: bool,
+    }
+    // 16ms tick 換算。初回リピートまで ~350ms、以降 ~48ms 間隔。
+    const REPEAT_INITIAL_DELAY_TICKS: u32 = 22;
+    const REPEAT_INTERVAL_TICKS: u32 = 3;
+    let repeat: Rc<RefCell<Repeat>> = Rc::new(RefCell::new(Repeat::default()));
+
+    // キー入力 → PTY。名前付き/方向/Ctrl/Alt は key_to_bytes が VT/C0 へ変換（未対応は None）。
+    // 併せてソフトリピートの対象として記録し、初回遅延を張り直す。
+    {
+        let term = term.clone();
+        let repeat = repeat.clone();
+        window.on_term_key(move |text, ctrl, alt| {
+            if let Some(bytes) = slint_glue::key_to_bytes(text.as_str(), ctrl, alt) {
+                if let Some(t) = term.borrow().as_ref() {
+                    t.feed_input(&bytes);
+                }
+                let mut r = repeat.borrow_mut();
+                if r.active && r.key == text.as_str() {
+                    // release を挟まず同じキーが再入 = コンポジタ由来の自動リピート。
+                    r.platform_autorepeat = true;
+                }
+                r.bytes = bytes;
+                r.key = text.to_string();
+                r.active = true;
+                r.delay = REPEAT_INITIAL_DELAY_TICKS;
+            }
+        });
+    }
+
+    // キー解放 → 同じキーならソフトリピートを止める。
+    {
+        let repeat = repeat.clone();
+        window.on_term_key_released(move |text| {
+            let mut r = repeat.borrow_mut();
+            if r.key == text.as_str() {
+                r.active = false;
+            }
+        });
+    }
+
+    // 毎フレーム駆動。端末ページに居る間だけ実体を持ち、離れたら破棄する。
+    // グリッドサイズは changed コールバックに頼らず、毎tickウィンドウ物理サイズから
+    // 算出して現在と異なれば resize する（初回フレームから正しい縦横比で描ける）。
+    let timer = slint::Timer::default();
+    {
+        let term = term.clone();
+        let repeat = repeat.clone();
+        let w = window.as_weak();
+        timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(16),
+            move || {
+                let Some(win) = w.upgrade() else { return };
+                let mut guard = term.borrow_mut();
+                if win.get_page() != Page::Terminal {
+                    // 離脱時に破棄（poll の外なので on_exit との借用衝突なし）。
+                    if guard.is_some() {
+                        *guard = None;
+                        repeat.borrow_mut().active = false;
+                    }
+                    return;
+                }
+                // 遅延生成（root シェルを常駐させないため）。
+                if guard.is_none() {
+                    // フォントは 20px。KMS 実機の物理解像度でちょうど読める大きさ
+                    // （26px は大きすぎた）。Wayland では小さめに見えるが実運用は KMS。
+                    let mut t = match Terminal::new(80, 24, 20.0, None) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            eprintln!("terminal: failed to start: {e}");
+                            win.set_page(Page::DiskSelect);
+                            return;
+                        }
+                    };
+                    // シェル終了で installer 画面へ戻す（コールバック内で drop はしない）。
+                    let w2 = w.clone();
+                    t.set_on_exit(move |_code| {
+                        if let Some(win) = w2.upgrade() {
+                            win.set_page(Page::DiskSelect);
+                        }
+                    });
+                    repeat.borrow_mut().active = false; // 前回の残留リピートを持ち越さない
+                    *guard = Some(t);
+                }
+                let t = guard.as_mut().unwrap();
+                // 描画領域に合わせてグリッドを追従（変化時のみ）。
+                let (pw, ph) = terminal_area_px(&win);
+                if pw > 0 && ph > 0 {
+                    let (cols, rows) = t.cells_for_pixels(pw, ph);
+                    if cols > 0 && rows > 0 && (cols, rows) != t.grid_size() {
+                        let _ = t.resize(cols, rows);
+                    }
+                }
+                // ソフトキーリピート（KMS 用。Wayland では delay が張り直され続け発火しない）。
+                {
+                    let mut r = repeat.borrow_mut();
+                    if r.active && !r.platform_autorepeat && !r.bytes.is_empty() {
+                        if r.delay > 0 {
+                            r.delay -= 1;
+                        } else {
+                            t.feed_input(&r.bytes);
+                            r.delay = REPEAT_INTERVAL_TICKS;
+                        }
+                    }
+                }
+                t.poll(); // ここで on_exit が発火し page を戻しうる
+                if win.get_page() != Page::Terminal {
+                    *guard = None; // exit 由来。破棄する
+                    repeat.borrow_mut().active = false;
+                    return;
+                }
+                if t.take_dirty() {
+                    let (rgba, iw, ih) = t.render();
+                    win.set_term_frame(slint_glue::rgba_to_image(rgba, iw, ih));
+                }
+            },
+        );
+    }
+    timer
 }
 
 /// 「ちょっと時間のかかる操作」の汎用ランナー。
