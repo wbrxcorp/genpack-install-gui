@@ -287,6 +287,9 @@ fn install_to_disk(opts: &InstallOptions, progress: &ProgressFn) -> Result<()> {
     let boot_dev: PathBuf;
     let data_dev: Option<PathBuf>;
     let bios_compatible: bool;
+    // ブートパーティション(FAT)のボリュームシリアル。extlinux SBC で
+    // root=systemimg:auto をインストール先に束縛するために使う。
+    let boot_uuid: Option<String>;
 
     if opts.superfloppy {
         st.begin("Formatting disk (FAT32)");
@@ -306,6 +309,7 @@ fn install_to_disk(opts: &InstallOptions, progress: &ProgressFn) -> Result<()> {
         )?;
         boot_dev = disk.to_path_buf();
         data_dev = None;
+        boot_uuid = blkid_uuid(disk).ok();
         // superfloppy は EFI 起動専用（BIOS ブートローダは導入しない）。
         bios_compatible = false;
     } else {
@@ -313,6 +317,15 @@ fn install_to_disk(opts: &InstallOptions, progress: &ProgressFn) -> Result<()> {
         // 2TiB 以下かつ論理セクタ 512B。GPT 選択オプションは GUI に無いので gpt=false 固定。
         let (disk_size, log_sec) = disk_geometry(disk);
         bios_compatible = disk_size <= 2 * 1024 * GIB && log_sec == 512;
+
+        // SBC のブートファームウェア(RasPi / EFI_PARTITION 無効の U-Boot)は GPT を読めない。
+        if sbc.is_some() && !bios_compatible {
+            return Err(
+                "this disk requires GPT, which the SBC boot firmware cannot read \
+                 (use a disk <=2TiB with 512-byte sectors)"
+                    .into(),
+            );
+        }
 
         st.begin("Creating partitions");
         // ブートパーティションのサイズ(GiB)。イメージがブートに収まるなら必要容量、
@@ -382,10 +395,10 @@ fn install_to_disk(opts: &InstallOptions, progress: &ProgressFn) -> Result<()> {
             ],
         )?;
         // data パーティションのラベルは boot の UUID を後置する（オリジナルに倣う）。
-        let boot_uuid = blkid_uuid(&bootp)?;
+        let uuid = blkid_uuid(&bootp)?;
 
         st.begin("Formatting data partition (BTRFS)");
-        let data_label = format!("data-{boot_uuid}");
+        let data_label = format!("data-{uuid}");
         run(
             "mkfs.btrfs",
             [
@@ -399,6 +412,7 @@ fn install_to_disk(opts: &InstallOptions, progress: &ProgressFn) -> Result<()> {
 
         boot_dev = bootp;
         data_dev = Some(datap);
+        boot_uuid = Some(uuid);
     }
 
     // boot パーティション（superfloppy 時はディスク自体）をマウント。
@@ -411,7 +425,7 @@ fn install_to_disk(opts: &InstallOptions, progress: &ProgressFn) -> Result<()> {
     if let (Some(profile), Some(root)) = (sbc, image_root)
         && let Some(handler) = profile.install_boot_files
     {
-        handler(root, boot_mnt.path())?;
+        handler(root, boot_mnt.path(), boot_uuid.as_deref())?;
     }
     // 汎用 EFI/BIOS ブートローダ。SBC 未検出時は無ければ起動不能なので必須。
     // SBC 検出時は SBC 側のブートファイルで起動できるため、無くてもエラーにしない。
@@ -536,17 +550,26 @@ struct SbcProfile {
     /// ブートパーティションを ESP(0xEF)としてマークしてよいか。
     /// RPi のファームウェアは ESP 型を嫌い FAT32-LBA(0x0c)を要求するため false。
     mark_esp: bool,
-    /// SBC 固有のブートファイル導入処理 `(image_root, boot_mnt)`。不要なら None。
-    install_boot_files: Option<fn(&Path, &Path) -> Result<()>>,
+    /// SBC 固有のブートファイル導入処理 `(image_root, boot_mnt, boot_uuid)`。不要なら None。
+    /// boot_uuid はブートパーティションの FAT ボリュームシリアル(取得できた場合)。
+    install_boot_files: Option<fn(&Path, &Path, Option<&str>) -> Result<()>>,
 }
 
 /// 対応 SBC 一覧。上から順に最初にマーカーが一致したものを採用する。
-const SBC_PROFILES: &[SbcProfile] = &[SbcProfile {
-    name: "Raspberry Pi",
-    marker: "boot/bootcode.bin",
-    mark_esp: false,
-    install_boot_files: Some(install_raspi_boot_files),
-}];
+const SBC_PROFILES: &[SbcProfile] = &[
+    SbcProfile {
+        name: "Raspberry Pi",
+        marker: "boot/bootcode.bin",
+        mark_esp: false,
+        install_boot_files: Some(install_raspi_boot_files),
+    },
+    SbcProfile {
+        name: "U-Boot extlinux SBC",
+        marker: "boot/extlinux/extlinux.conf",
+        mark_esp: false,
+        install_boot_files: Some(install_extlinux_boot_files),
+    },
+];
 
 /// イメージルート内のマーカーファイルから SBC 種別を判定する。
 fn detect_sbc(image_root: &Path) -> Option<&'static SbcProfile> {
@@ -562,7 +585,7 @@ fn detect_sbc(image_root: &Path) -> Option<&'static SbcProfile> {
 ///     `root=systemimg:auto` に置換し、`rootfstype=…` を除去して書き出す。
 ///   - `config.txt`: ブート先に既にあれば上書きしない。
 ///   - それ以外: 上書きコピー。
-fn install_raspi_boot_files(image_root: &Path, boot_mnt: &Path) -> Result<()> {
+fn install_raspi_boot_files(image_root: &Path, boot_mnt: &Path, _boot_uuid: Option<&str>) -> Result<()> {
     let src_boot = image_root.join("boot");
     for src in walk_files(&src_boot)? {
         let rel = src.strip_prefix(&src_boot).unwrap_or(&src);
@@ -589,6 +612,86 @@ fn install_raspi_boot_files(image_root: &Path, boot_mnt: &Path) -> Result<()> {
         std::fs::copy(&src, &dest).map_err(|e| format!("copy {}: {e}", rel.display()))?;
     }
     Ok(())
+}
+
+/// U-Boot extlinux(bootstd) 用ブートファイルを導入する。
+///
+/// イメージの `boot/extlinux/extlinux.conf` が参照するファイル(kernel/initrd/fdt 等)だけを
+/// ブートパーティションへコピーする。/boot 全コピーにしないのは、kernel-install.py が作る
+/// symlink(/boot/kernel 等)と実体の二重コピーを避けるため。
+///   - extlinux.conf: ブート先に既にあれば上書きしない(ユーザーカスタマイズ保持。
+///     参照ファイル名は更新をまたいで安定しているため据え置きで問題ない)。
+///   - 参照ファイル: 上書きコピー(セルフアップデート時のカーネル等差し替え)。
+fn install_extlinux_boot_files(image_root: &Path, boot_mnt: &Path, boot_uuid: Option<&str>) -> Result<()> {
+    let conf_src = image_root.join("boot/extlinux/extlinux.conf");
+    let content =
+        std::fs::read_to_string(&conf_src).map_err(|e| format!("read extlinux.conf: {e}"))?;
+    for rel in extlinux_referenced_files(&content)? {
+        let src = image_root.join("boot").join(&rel);
+        if !src.exists() {
+            return Err(format!(
+                "{} referenced by extlinux.conf does not exist in system image",
+                rel.display()
+            ));
+        }
+        let dest = boot_mnt.join(&rel);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create {}: {e}", parent.display()))?;
+        }
+        std::fs::copy(&src, &dest).map_err(|e| format!("copy {}: {e}", rel.display()))?;
+    }
+    let conf_dest = boot_mnt.join("extlinux/extlinux.conf");
+    if !conf_dest.exists() {
+        if let Some(parent) = conf_dest.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create {}: {e}", parent.display()))?;
+        }
+        // イメージ内の root=systemimg:auto は汎用フォールバック。インストール時に
+        // このブートパーティションの実UUIDへ束縛する(grub.cfg がブート時に probe -u
+        // で行っていることの extlinux 版)。他ディスクの system.img を initramfs の
+        // autoスキャンが拾ってしまう事故を防ぐ。
+        let bound = match boot_uuid {
+            Some(uuid) => content.replace("root=systemimg:auto", &format!("root=systemimg:{uuid}")),
+            None => content.clone(),
+        };
+        std::fs::write(&conf_dest, bound).map_err(|e| format!("write extlinux.conf: {e}"))?;
+    }
+    Ok(())
+}
+
+/// extlinux.conf が参照するファイル(KERNEL/LINUX/INITRD/FDT/FDTOVERLAYS 等の行)を列挙する。
+/// conf 内のパスはブートパーティションルートからの絶対パスなので、先頭の `/` を除いた
+/// 相対パスとして返す(重複は除去)。
+fn extlinux_referenced_files(content: &str) -> Result<Vec<PathBuf>> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    for line in content.lines() {
+        let mut tokens = line.split_whitespace();
+        let Some(keyword) = tokens.next() else { continue };
+        match keyword.to_ascii_lowercase().as_str() {
+            // FDTOVERLAYS は空白区切りで複数パスを取り得る
+            "kernel" | "linux" | "initrd" | "fdt" | "devicetree" | "fdtoverlays"
+            | "devicetree-overlay" => {
+                for path in tokens {
+                    let rel = PathBuf::from(path.trim_start_matches('/'));
+                    if !files.contains(&rel) {
+                        files.push(rel);
+                    }
+                }
+            }
+            "fdtdir" => {
+                return Err(
+                    "FDTDIR in extlinux.conf is not supported. Use FDT with an explicit path."
+                        .into(),
+                );
+            }
+            _ => {}
+        }
+    }
+    if files.is_empty() {
+        return Err("extlinux.conf doesn't reference any kernel/initrd/fdt files".into());
+    }
+    Ok(files)
 }
 
 /// RPi の cmdline.txt を書き換える: `root=…` → `root=systemimg:auto`、`rootfstype=…` を除去。
@@ -1180,6 +1283,44 @@ mod tests {
     }
 
     /// マウント中のパーティションを持つディスクは親ごと除外される。
+    #[test]
+    fn extlinux_referenced_files_collects_deduped_relative_paths() {
+        // 複数 label で重複参照されるファイルは 1 回だけ。FDTOVERLAYS は複数パス可。
+        // キーワードは大文字小文字を区別しない。パスは先頭 '/' を除いた相対で返る。
+        let conf = concat!(
+            "default genpack\n",
+            "timeout 10\n",
+            "label genpack\n",
+            "    KERNEL /kernel\n",
+            "    initrd /initramfs\n",
+            "    fdt /imx95-catalina-gw92xx-0x.dtb\n",
+            "    append root=systemimg:auto console=ttyLP0,115200\n",
+            "label genpack-transient\n",
+            "    kernel /kernel\n",
+            "    initrd /initramfs\n",
+            "    fdt /imx95-catalina-gw92xx-0x.dtb\n",
+            "    fdtoverlays /overlays/foo.dtbo /overlays/bar.dtbo\n",
+            "    append root=systemimg:auto genpack.transient=1\n",
+        );
+        let files = extlinux_referenced_files(conf).unwrap();
+        assert_eq!(
+            files,
+            vec![
+                PathBuf::from("kernel"),
+                PathBuf::from("initramfs"),
+                PathBuf::from("imx95-catalina-gw92xx-0x.dtb"),
+                PathBuf::from("overlays/foo.dtbo"),
+                PathBuf::from("overlays/bar.dtbo"),
+            ]
+        );
+
+        // FDTDIR は非対応としてエラー。
+        assert!(extlinux_referenced_files("label x\n    fdtdir /dtbs\n").is_err());
+
+        // ファイル参照が 1 つも無い conf はエラー。
+        assert!(extlinux_referenced_files("default foo\n").is_err());
+    }
+
     #[test]
     fn installable_disks_excludes_disk_with_mounted_partition() {
         let out = concat!(
