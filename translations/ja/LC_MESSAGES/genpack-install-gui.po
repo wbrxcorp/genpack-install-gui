@@ -97,12 +97,6 @@ msgstr "再起動"
 msgid "System information"
 msgstr "システム情報"
 
-msgid "Terminal is not implemented yet."
-msgstr "ターミナルはまだ実装されていません。"
-
-msgid "Planned: PTY + alacritty-terminal + fontdue rendered onto a Slint Image. Type 'exit' to return."
-msgstr "実装予定: PTY + alacritty-terminal + fontdue で Slint の Image に描画。'exit' で戻ります。"
-
 msgid "Menu"
 msgstr "メニュー"
 
